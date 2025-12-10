@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Carnoustie – HST Braking Challenge</title>
+<title>HST Braking Challenge – Carnoustie → Arbroath</title>
+
 <style>
   body {
     background:#111;
@@ -15,12 +16,13 @@
   }
   h1 {
     font-size:22px;
-    margin:10px 5px 4px;
+    margin:12px 5px 4px;
   }
   p {
     margin:0 8px 8px;
     font-size:14px;
   }
+
   canvas {
     background:#1a1d24;
     margin-top:8px;
@@ -32,9 +34,11 @@
     height:auto;
     touch-action:none;
   }
+
   #hud {
     font-size:16px;
     margin:6px;
+    min-height:3em;
   }
   #message {
     font-size:18px;
@@ -42,12 +46,26 @@
     min-height:1.5em;
   }
 
-  /* Mobile/touch controls */
+  #endScreen {
+    display:none;
+    text-align:center;
+    padding:20px;
+  }
+  #endScreen button {
+    padding:10px 20px;
+    font-size:18px;
+    border-radius:6px;
+    border:1px solid #555;
+    background:#222;
+    color:#fff;
+    cursor:pointer;
+  }
+
   #controls {
     position:sticky;
     bottom:0;
     background:#111;
-    padding:6px 4px 10px;
+    padding:6px 4px 12px;
     border-top:1px solid #333;
     display:flex;
     justify-content:center;
@@ -64,533 +82,522 @@
     background:#222;
     color:#fff;
     font-size:14px;
+    cursor:pointer;
   }
   #controls button:active {
     background:#444;
   }
-  #controls button.emergency {
-    border-color:#a00;
-  }
-  #controls button.newrun {
-    border-color:#0a0;
-  }
-
-  @media (min-width: 800px) {
-    h1 { font-size:26px; }
-    p { font-size:15px; }
-    #hud { font-size:17px; }
-    #message { font-size:20px; }
-    #controls button {
-      max-width:160px;
-      font-size:15px;
-    }
-  }
+  #controls button.emergency { border-color:#a00; }
+  #controls button.newrun   { border-color:#0a0; }
 </style>
 </head>
+
 <body>
-<h1>Carnoustie – HST Braking Challenge</h1>
-<p>
-  Controls: <b>A</b> = Apply, <b>R</b> = Release, <b>E</b> = Emergency,
-  <b>N</b> = New run – or use the buttons below on mobile.
-</p>
+<h1>HST Braking Challenge</h1>
+<p>Carnoustie → Arbroath (two-stage run)</p>
+
 <div id="hud"></div>
 <div id="message"></div>
+
 <canvas id="c" width="1000" height="260"></canvas>
 
+<div id="endScreen">
+  <h2>Final Results</h2>
+  <div id="scoreSummary"></div>
+  <br>
+  <button onclick="restartGame()">Play Again</button>
+</div>
+
 <div id="controls">
-  <button onclick="setBrakeCmd(brakeCmd - 1)">Release</button>
-  <button onclick="setBrakeCmd(brakeCmd + 1)">Apply</button>
-  <button class="emergency" onclick="setBrakeCmd(6)">Emergency</button>
-  <button class="newrun" onclick="resetRun()">New run</button>
+  <button onclick="setBrakeCmd(brakeCmd - 1)">Release (R)</button>
+  <button onclick="setBrakeCmd(brakeCmd + 1)">Apply (A)</button>
+  <button class="emergency" onclick="setBrakeCmd(6)">Emergency (E)</button>
+  <button class="newrun" onclick="restartLevel()">Restart (N)</button>
 </div>
 
 <script>
-// ---------- Constants ----------
+// ===========================================================
+// CONSTANTS
+// ===========================================================
 const c = document.getElementById("c");
 const x = c.getContext("2d");
 
-const MPH_TO_MS   = 0.44704;
-const YARD_TO_M   = 0.9144;
+const MPH_TO_MS = 0.44704;
+const YARD_TO_M = 0.9144;
 
-const INITIAL_SPEED_MPH   = 100;              // starting speed
-const INITIAL_DIST_YARDS  = 2200;             // distance from cab to END of platform
-const START_DIST_M        = INITIAL_DIST_YARDS * YARD_TO_M;
+const INITIAL_CARNOUSTIE_SPEED = 100;
+const INITIAL_ARBROATH_SPEED   = 65;
 
-const TRAIN_CARS     = 6;                     // power + 4 coaches + power
-const CAR_LENGTH_M   = 23;                    // approx vehicle length
+const INITIAL_DIST_YARDS = 2200;
+const START_DIST_M       = INITIAL_DIST_YARDS * YARD_TO_M;
+
+const TRAIN_CARS   = 6;
+const CAR_LENGTH_M = 23;
 const TRAIN_LENGTH_M = TRAIN_CARS * CAR_LENGTH_M;
 
-const CAR_PIXEL      = 48;                    // visual size per vehicle
-const TRAIN_PIXEL    = TRAIN_CARS * CAR_PIXEL;
+const CAR_PIXEL   = 48;
+const TRAIN_PIXEL = TRAIN_CARS * CAR_PIXEL;
 
-// timing for brake changes
-const APPLY_DELAY_SERVICE   = 1.5;            // seconds per step up (service)
+const APPLY_DELAY_SERVICE = 1.5;
+const RELEASE_DELAY_HIGH  = 10;
+const RELEASE_DELAY_LOW   = 2;
+const TIME_SCALE          = 3.0;
 
-// release: very slow from high steps, quicker from low steps
-const RELEASE_DELAY_HIGH    = 10.0;           // 5→4, 4→3
-const RELEASE_DELAY_LOW     = 2.0;            // 3→2→1→0
-
-// time scale for physics (makes everything feel nervier)
-const TIME_SCALE = 3.0;
-
-// stop categories (yards from marker)
 const PERFECT_YARDS    = 10;
 const ACCEPTABLE_YARDS = 20;
 const CLOSE_YARDS      = 50;
 
-// ---------- State ----------
-// motion + braking
-let speed;        // m/s
-let dist;         // m, cab to marker (positive = before, negative = overrun)
-let brakeCmd;     // 0–6 commanded step
-let brakeAct;     // 0–6 actual step
-let brakeTimer;   // s since last change
+const OVERSPEED_THRESHOLD_MPH = 30;
+
+// ===========================================================
+// STATE
+// ===========================================================
+let currentLevel = "carnoustie";
+
+let speed;
+let dist;
+let brakeCmd;
+let brakeAct;
+let brakeTimer;
 let usedEmergency;
 let gameOver;
+let prevDist;
 let lastTime = 0;
 
-// scoring
-let brakeInputCount;   // internal only, not displayed
+let brakeInputCount = 0;
+let overspeedFlag = false;
 
-// mid-run behaviour
-let prevDist;
-let slowCrawlTimer = 0;
-let slowCrawlMessageShown = false;
-let speedDemonShown = false;
+let scoreCarnoustie = null;
+let scoreArbroath   = null;
 
-// ---------- Reset ----------
-function resetRun() {
-  speed         = INITIAL_SPEED_MPH * MPH_TO_MS;
+// ===========================================================
+// INITIALISATION
+// ===========================================================
+function resetRunCommon() {
   dist          = START_DIST_M;
   brakeCmd      = 0;
   brakeAct      = 0;
   brakeTimer    = 0;
   usedEmergency = false;
   gameOver      = false;
-  lastTime      = 0;
+  overspeedFlag = false;
+  brakeInputCount = 0;
 
-  brakeInputCount        = 0;
-
-  prevDist               = dist;
-  slowCrawlTimer         = 0;
-  slowCrawlMessageShown  = false;
-  speedDemonShown        = false;
-
-  document.getElementById("message").innerHTML = "";
-}
-resetRun();
-
-// ---------- Scoring ----------
-function calculateScore(yardsError, finalBrakeAct) {
-  const absYards = Math.abs(yardsError);
-  let score = 100;
-
-  // 1) Accuracy penalty: up to -60
-  const accuracyPenalty = Math.min(absYards * 1.2, 60);
-  score -= accuracyPenalty;
-
-  // 2) Input penalty (hidden): up to 3 inputs free, then -5 each
-  const extraInputs = Math.max(0, brakeInputCount - 3);
-  const inputPenalty = extraInputs * 5;
-  score -= inputPenalty;
-
-  // 3) Final brake penalty: step 0–1 free, higher steps cost
-  const effectiveFinalStep = Math.max(0, finalBrakeAct - 1);
-  const finalBrakePenalty = effectiveFinalStep * 3;
-  score -= finalBrakePenalty;
-
-  // 4) Emergency penalty
-  if (usedEmergency) {
-    score -= 15;
-  }
-
-  // Clamp & round
-  if (score < 0) score = 0;
-  if (score > 100) score = 100;
-  return Math.round(score);
+  prevDist = dist;
+  document.getElementById("message").textContent = "";
 }
 
-// ---------- Physics ----------
-function updatePhysics(physicsDt, realDt) {
+function loadCarnoustie() {
+  currentLevel = "carnoustie";
+  resetRunCommon();
+  speed = INITIAL_CARNOUSTIE_SPEED * MPH_TO_MS;
+}
 
-  // brake propagation: command vs actual (uses REAL time)
-  // Emergency (6) applies instantly, no delay
+function loadArbroath() {
+  currentLevel = "arbroath";
+  resetRunCommon();
+  speed = INITIAL_ARBROATH_SPEED * MPH_TO_MS;
+}
+
+function restartLevel() {
+  if (currentLevel === "carnoustie") loadCarnoustie();
+  else loadArbroath();
+}
+
+function restartGame() {
+  scoreCarnoustie = null;
+  scoreArbroath   = null;
+  document.getElementById("endScreen").style.display = "none";
+  document.getElementById("controls").style.display = "flex";
+  loadCarnoustie();
+}
+
+loadCarnoustie();
+
+// ===========================================================
+// CONTROLS
+// ===========================================================
+function setBrakeCmd(newCmd) {
+  if (gameOver || currentLevel === "complete") return;
+  newCmd = Math.max(0, Math.min(6, newCmd));
+  if (newCmd !== brakeCmd) brakeInputCount++;
+  brakeCmd = newCmd;
+}
+
+document.addEventListener("keydown", (e) => {
+  if (currentLevel === "complete") return;
+  const k = e.key.toLowerCase();
+  if (k === "a") setBrakeCmd(brakeCmd + 1);
+  if (k === "r") setBrakeCmd(brakeCmd - 1);
+  if (k === "e") setBrakeCmd(6);
+  if (k === "n") restartLevel();
+});
+
+// ===========================================================
+// PHYSICS
+// ===========================================================
+function updatePhysics(dt, realDt) {
+
   if (brakeCmd === 6 && brakeAct !== 6) {
     brakeAct = 6;
     brakeTimer = 0;
-
   } else if (brakeAct !== brakeCmd) {
     brakeTimer += realDt;
 
     if (brakeCmd > brakeAct) {
-      // normal service steps use the usual delay
-      const targetDelay = APPLY_DELAY_SERVICE;
-      if (brakeTimer > targetDelay) {
+      if (brakeTimer >= APPLY_DELAY_SERVICE) {
         brakeAct++;
         brakeTimer = 0;
       }
-
-    } else if (brakeCmd < brakeAct) {
-      // releasing from any step (including emergency) is still slow
-      const targetDelay = (brakeAct > 3)
-        ? RELEASE_DELAY_HIGH
-        : RELEASE_DELAY_LOW;
-      if (brakeTimer > targetDelay) {
+    } else {
+      const delay = brakeAct > 3 ? RELEASE_DELAY_HIGH : RELEASE_DELAY_LOW;
+      if (brakeTimer >= delay) {
         brakeAct--;
         brakeTimer = 0;
       }
     }
   }
 
-  // braking force model
-  let a = 0; // acceleration (m/s^2)
+  let a = 0;
 
   if (brakeAct > 0 && brakeAct < 6) {
-
-    // Softer low steps
-    if (brakeAct === 1) {
-      a = -0.12; // gentle trim brake
-    } else if (brakeAct === 2) {
-      a = -0.32; // moderate brake
-    } else {
-      // strong curve for 3-5
-      const base = 0.30;
-      a = -base * brakeAct * (1 + 0.3 * brakeAct);
+    if (brakeAct === 1) a = -0.12;
+    else if (brakeAct === 2) a = -0.32;
+    else {
+      a = -0.30 * brakeAct * (1 + 0.3 * brakeAct);
     }
-
   } else if (brakeAct === 6) {
-    // emergency: biggest bite
-    a = -4.0;          // clearly stronger than any service step
+    a = -4.0;
     usedEmergency = true;
   }
 
-  // rolling resistance
-  if (brakeAct === 0 && speed > 0.1) {
-    a -= 0.01;
-  }
+  if (brakeAct === 0 && speed > 0.1) a -= 0.01;
 
-  // update speed & position
-  speed += a * physicsDt;
+  speed += a * dt;
   if (speed < 0) speed = 0;
 
-  dist -= speed * physicsDt;
+  dist -= speed * dt;
 }
 
-// ---------- Mid-run messages ----------
-function handleMidRunMessages(realDt) {
-  const PLATFORM_LENGTH_M = TRAIN_LENGTH_M;
-  const speedMph = speed * 2.23694;
+// ===========================================================
+// OVERSPEED TRIGGER AT PLATFORM START
+// ===========================================================
+function checkOverspeed() {
+  if (currentLevel !== "arbroath") return;
 
-  // "Wooooah speed demon!"
-  if (!speedDemonShown) {
-    if (prevDist > PLATFORM_LENGTH_M && dist <= PLATFORM_LENGTH_M && speedMph > 50) {
-      const msgEl = document.getElementById("message");
-      msgEl.style.color = "#ff8800";
-      msgEl.textContent = "Wooooah speed demon!";
-      speedDemonShown = true;
+  const endX = c.width - 60;
+  const startX = endX - TRAIN_PIXEL;
+
+  const noseOrigin = 60 + 40;
+  const ppm = (endX - noseOrigin) / START_DIST_M;
+
+  const boardDistM = (endX - startX) / ppm;
+
+  if (!overspeedFlag &&
+      prevDist > boardDistM &&
+      dist <= boardDistM) {
+
+    const mph = speed * 2.23694;
+    if (mph >= OVERSPEED_THRESHOLD_MPH) {
+      overspeedFlag = true;
+      const m = document.getElementById("message");
+      m.style.color = "#ff8800";
+      m.textContent = "Overspeed!";
     }
   }
-
-  // "zzzzzzz hurry up." for long crawl <10 mph
-  if (!slowCrawlMessageShown && dist <= PLATFORM_LENGTH_M && speedMph < 10 && speed > 0.01) {
-    slowCrawlTimer += realDt;
-    if (slowCrawlTimer > 10) {
-      const msgEl = document.getElementById("message");
-      msgEl.style.color = "#cccccc";
-      msgEl.textContent = "zzzzzzz hurry up.";
-      slowCrawlMessageShown = true;
-    }
-  } else if (dist > PLATFORM_LENGTH_M || speedMph >= 10 || speed <= 0.01) {
-    slowCrawlTimer = 0;
-  }
-
-  prevDist = dist;
 }
 
-// ---------- Drawing helpers ----------
+// ===========================================================
+// DRAWING
+// ===========================================================
 function drawTracks(trackY) {
   x.fillStyle = "#808080";
   x.fillRect(0, trackY - 20, c.width, 40);
 
   x.fillStyle = "#4c4c4c";
-  for (let sxPos = -20; sxPos < c.width + 20; sxPos += 28) {
-    x.fillRect(sxPos, trackY - 8, 22, 16);
+  for (let p = -20; p < c.width + 20; p += 28) {
+    x.fillRect(p, trackY - 8, 22, 16);
   }
 
   x.fillStyle = "#e0e0e0";
-  const railSpacing = 18;
-  x.fillRect(0, trackY - railSpacing, c.width, 3);
-  x.fillRect(0, trackY + railSpacing - 3, c.width, 3);
+  x.fillRect(0, trackY - 18, c.width, 3);
+  x.fillRect(0, trackY + 15, c.width, 3);
 }
 
-function drawStation(trackY, platformStartX, platformEndX) {
-  // Platform clearly above the track/rails
-  const platformHeight  = 60;
-  const platformBottomY = trackY - 28;
-  const platformTopY    = platformBottomY - platformHeight;
+function drawStation(trackY, startX, endX) {
+  const platformH = 60;
+  const bottom = trackY - 28;
+  const top = bottom - platformH;
 
-  // platform slab
   x.fillStyle = "#d0d3dc";
-  x.fillRect(platformStartX, platformTopY, platformEndX - platformStartX, platformHeight);
+  x.fillRect(startX, top, endX - startX, platformH);
 
-  // platform edge (yellow line) just back from the drop
   x.fillStyle = "#f9e547";
-  x.fillRect(platformStartX, platformBottomY - 4, platformEndX - platformStartX, 3);
+  x.fillRect(startX, bottom - 4, endX - startX, 3);
 
-  // simple shelter only
-  const shelterX = platformEndX - 110;
-  const shelterY = platformTopY + 5;
-  const shelterW = 80;
-  const shelterH = 35;
+  const name = currentLevel === "arbroath" ? "Arbroath" : "Carnoustie";
 
-  x.fillStyle = "#b0b7c5";
-  x.fillRect(shelterX, shelterY, shelterW, shelterH);
-  x.fillStyle = "#e0e5f0";
-  x.fillRect(shelterX + 6, shelterY + 5, shelterW - 12, shelterH - 10);
-
-  // station name board: Carnoustie
-  const signW = 140;
-  const signH = 26;
-  const signX = (platformStartX + platformEndX) / 2 - signW / 2;
-  const signY = platformTopY - 30;
-
-  // posts
-  x.fillStyle = "#d6d6d6";
-  x.fillRect(signX + 10, signY + signH, 6, 20);
-  x.fillRect(signX + signW - 16, signY + signH, 6, 20);
-
-  // board
   x.fillStyle = "#1f2a38";
-  x.fillRect(signX, signY, signW, signH);
-  x.strokeStyle = "#ffffff";
-  x.lineWidth = 2;
-  x.strokeRect(signX + 1, signY + 1, signW - 2, signH - 2);
+  const w = 140, h = 26;
+  const sx = (startX + endX - w) / 2;
+  const sy = top - 30;
+  x.fillRect(sx, sy, w, h);
 
-  x.fillStyle = "#ffffff";
+  x.strokeStyle = "#fff";
+  x.strokeRect(sx + 1, sy + 1, w - 2, h - 2);
+
+  x.fillStyle = "#fff";
   x.font = "14px sans-serif";
   x.textAlign = "center";
   x.textBaseline = "middle";
-  x.fillText("Carnoustie", signX + signW / 2, signY + signH / 2);
+  x.fillText(name, sx + w / 2, sy + h / 2);
 
   x.textAlign = "left";
   x.textBaseline = "alphabetic";
 }
 
-function drawTrain(trackY, platformEndX) {
-  const marginLeft = 60;
-  const startX = marginLeft + 40;
-  const pixelsPerMeter = (platformEndX - startX) / START_DIST_M;
+function drawTrain(trackY, endX) {
+  const noseBase = 60 + 40;
+  const ppm = (endX - noseBase) / START_DIST_M;
 
-  let noseX = (dist >= 0)
-    ? Math.max(platformEndX - dist * pixelsPerMeter, startX)
-    : platformEndX + (-dist) * pixelsPerMeter;
+  let noseX = dist >= 0
+    ? Math.max(endX - dist * ppm, noseBase)
+    : endX + (-dist) * ppm;
 
-  const carY = trackY - 52;
-  const carHeight = 40;
-
-  const powerColor  = "#777777";
-  const coachColor  = "#aaaaaa";
-  const roofDark    = "#555555";
-  const windowBlue  = "#cfd8ff";
+  const y = trackY - 52;
+  const h = 40;
 
   for (let i = 0; i < TRAIN_CARS; i++) {
-    const carFrontX = noseX - CAR_PIXEL * i;
-    const carRearX  = carFrontX - CAR_PIXEL;
+    const fx = noseX - CAR_PIXEL * i;
+    const rx = fx - CAR_PIXEL;
 
-    const isFrontPower = (i === 0);
-    const isRearPower  = (i === TRAIN_CARS - 1);
+    const isFront = (i === 0);
+    const isRear = (i === TRAIN_CARS - 1);
 
-    x.fillStyle = (isFrontPower || isRearPower) ? powerColor : coachColor;
-    x.fillRect(carRearX, carY, CAR_PIXEL, carHeight);
+    const body = (isFront || isRear) ? "#777" : "#aaa";
+    x.fillStyle = body;
+    x.fillRect(rx, y, CAR_PIXEL, h);
 
-    x.fillStyle = roofDark;
-    x.fillRect(carRearX, carY - 4, CAR_PIXEL, 6);
+    x.fillStyle = "#555";
+    x.fillRect(rx, y - 4, CAR_PIXEL, 6);
 
-    x.fillStyle = windowBlue;
-    x.fillRect(carRearX + 6, carY + 10, CAR_PIXEL - 12, 14);
+    x.fillStyle = "#cfd8ff";
+    x.fillRect(rx + 6, y + 10, CAR_PIXEL - 12, 14);
 
-    if (isFrontPower) {
-      x.fillStyle = powerColor;
+    if (isFront) {
+      x.fillStyle = body;
       x.beginPath();
-      x.moveTo(carFrontX, carY);
-      x.lineTo(carFrontX + 10, carY + carHeight / 2);
-      x.lineTo(carFrontX, carY + carHeight);
+      x.moveTo(fx, y);
+      x.lineTo(fx + 10, y + h / 2);
+      x.lineTo(fx, y + h);
       x.closePath();
       x.fill();
     }
-    if (isRearPower) {
-      x.fillStyle = powerColor;
+    if (isRear) {
+      x.fillStyle = body;
       x.beginPath();
-      x.moveTo(carRearX, carY);
-      x.lineTo(carRearX - 10, carY + carHeight / 2);
-      x.lineTo(carRearX, carY + carHeight);
+      x.moveTo(rx, y);
+      x.lineTo(rx - 10, y + h / 2);
+      x.lineTo(rx, y + h);
       x.closePath();
       x.fill();
     }
   }
 }
 
-// ---------- Formatting helpers ----------
-function formatBrakeController(step) {
-  switch (step) {
-    case 0: return "Run";
-    case 1: return "Initial";
-    case 6: return "Emergency";
-    default: return step.toString();
-  }
+function drawSpeedBoard20(trackY, endX) {
+  const startX = endX - TRAIN_PIXEL;
+  const y = trackY - 60;
+
+  x.beginPath();
+  x.strokeStyle = "#ff0000";
+  x.lineWidth = 4;
+  x.arc(startX, y, 20, 0, Math.PI * 2);
+  x.stroke();
+
+  x.beginPath();
+  x.fillStyle = "#ffffff";
+  x.arc(startX, y, 16, 0, Math.PI * 2);
+  x.fill();
+
+  x.fillStyle = "#000";
+  x.font = "16px sans-serif";
+  x.textAlign = "center";
+  x.textBaseline = "middle";
+  x.fillText("20", startX, y);
 }
 
-function formatBogiePressure(step) {
-  if (step === 6) return "6 (Emergency)";
-  return step.toString();
-}
-
-// ---------- Main scene drawing ----------
-function drawScene() {
-  x.clearRect(0, 0, c.width, c.height);
-
-  const skyGrad = x.createLinearGradient(0, 0, 0, c.height);
-  skyGrad.addColorStop(0, "#87ceeb");
-  skyGrad.addColorStop(0.6, "#66a6ff");
-  skyGrad.addColorStop(1, "#b3e5ff");
-  x.fillStyle = skyGrad;
-  x.fillRect(0, 0, c.width, c.height);
-
-  const marginRight = 60;
-  const trackY = 185; // fixed for original 1000x260 coords
-
-  const platformEndX   = c.width - marginRight;
-  const platformStartX = platformEndX - TRAIN_PIXEL;
-
-  drawTracks(trackY);
-  drawStation(trackY, platformStartX, platformEndX);
-
-  x.fillStyle = "deepskyblue";
-  x.fillRect(platformEndX - 3, trackY - 40, 6, 80);
-
-  drawTrain(trackY, platformEndX);
-}
-
-// ---------- HUD ----------
+// ===========================================================
+// HUD & SCORING
+// ===========================================================
 function updateHUD() {
-  const hud = document.getElementById("hud");
+  if (currentLevel === "complete") return;
 
-  const distYards = dist / YARD_TO_M;
-  let distText;
-  if (distYards >= 0) {
-    distText = distYards.toFixed(0) + " yards to END of platform (cab to marker)";
-  } else {
-    distText = Math.abs(distYards).toFixed(1) + " yards past the marker";
-  }
+  const yds = dist / YARD_TO_M;
+  const dTxt = yds >= 0
+    ? `${yds.toFixed(0)} yards to END of platform`
+    : `${Math.abs(yds).toFixed(1)} yards past`;
 
-  hud.innerHTML = `
-    Speed: ${(speed * 2.23694).toFixed(1)} mph<br>
-    ${distText}<br>
-    Brake controller: ${formatBrakeController(brakeCmd)} |
-    Bogie pressure: ${formatBogiePressure(brakeAct)}
-  `;
+  const brakeLabel =
+      brakeCmd === 0 ? "Run" :
+      brakeCmd === 1 ? "Initial" :
+      brakeCmd === 6 ? "Emergency" :
+      brakeCmd;
+
+  document.getElementById("hud").innerHTML =
+    `Level: ${currentLevel}<br>
+     Speed: ${(speed * 2.23694).toFixed(1)} mph<br>
+     ${dTxt}<br>
+     Brake controller: ${brakeLabel} |
+     Bogie pressure: ${brakeAct}`;
 }
 
-// ---------- Stop evaluation ----------
+function calculateScore(yardsError, finalBrakeAct) {
+  let score = 100;
+  const abs = Math.abs(yardsError);
+
+  score -= Math.min(abs * 1.2, 60);
+
+  const extraInputs = Math.max(0, brakeInputCount - 3);
+  score -= extraInputs * 5;
+
+  const pressurePenalty = Math.max(0, finalBrakeAct - 1) * 3;
+  score -= pressurePenalty;
+
+  if (usedEmergency) score -= 15;
+  if (currentLevel === "arbroath" && overspeedFlag) score -= 25;
+
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
 function checkStop() {
-  if (speed > 0.1) return false; // still moving
+  if (speed > 0.1) return false;
 
-  const yardsError = dist / YARD_TO_M;
-  const absYards = Math.abs(yardsError);
+  const yds = dist / YARD_TO_M;
+  const abs = Math.abs(yds);
+  const dir = yds > 0 ? "short" : "over";
 
-  const direction = yardsError > 0 ? "short" : "over";
-  const absText = absYards.toFixed(2);
-
+  const score = calculateScore(yds, brakeAct);
   const msgEl = document.getElementById("message");
 
-  // compute score once we’ve stopped, using final brake step
-  const score = calculateScore(yardsError, brakeAct);
-  const scoreText = ` Score: ${score}/100.`;
+  if (currentLevel === "carnoustie") scoreCarnoustie = score;
+  if (currentLevel === "arbroath")   scoreArbroath   = score;
 
-  if (absYards <= 1) {
+  let msg;
+  if (abs <= 1) {
     msgEl.style.color = "#00ffcc";
-    msgEl.textContent =
-      `Wow are you Paul Diack? – ${absText} yards ${direction}.` + scoreText;
-
-  } else if (absYards <= PERFECT_YARDS) {
+    msg = `Wow are you Paul Diack? – ${abs.toFixed(2)} yards ${dir}. Score: ${score}`;
+  } else if (abs <= PERFECT_YARDS) {
     msgEl.style.color = "#00ff66";
-    msgEl.textContent =
-      `Perfect Stop (within 10 yards) – ${absText} yards ${direction}.` +
-      scoreText;
-
-  } else if (absYards <= ACCEPTABLE_YARDS) {
+    msg = `Perfect stop – ${abs.toFixed(2)} yards ${dir}. Score: ${score}`;
+  } else if (abs <= ACCEPTABLE_YARDS) {
     msgEl.style.color = "#99ff33";
-    msgEl.textContent =
-      `Acceptable Stop (within 20 yards) – ${absText} yards ${direction}.` +
-      scoreText;
-
-  } else if (absYards <= CLOSE_YARDS) {
+    msg = `Acceptable stop – ${abs.toFixed(2)} yards ${dir}. Score: ${score}`;
+  } else if (abs <= CLOSE_YARDS) {
     msgEl.style.color = "#ffcc00";
-    msgEl.textContent =
-      `Oooooft that was close! – ${absText} yards ${direction}.` + scoreText;
-
-  } else if (yardsError > 0) {
-    msgEl.style.color = "#ffcc00";
-    msgEl.textContent =
-      `Stopped short by ${absText} yards. Speak to DTM ASAP.` +
-      scoreText;
-
+    msg = `Oooooft that was close! – ${abs.toFixed(2)} yards ${dir}. Score: ${score}`;
   } else {
-    msgEl.style.color = "#f00";
-    msgEl.textContent =
-      `Overrun by ${absText} yards. Speak to DTM ASAP.` +
-      scoreText;
+    msgEl.style.color = "#ff4444";
+    msg = `${abs.toFixed(2)} yards ${dir}. Score: ${score}`;
   }
 
+  msgEl.textContent = msg;
   return true;
 }
 
-// ---------- Main Loop ----------
-function loop(timestamp) {
-  if (!lastTime) lastTime = timestamp;
-  const realDt = (timestamp - lastTime) / 1000;
-  lastTime = timestamp;
+// ===========================================================
+// LEVEL TRANSITIONS
+// ===========================================================
+function endCarnoustie() {
+  const m = document.getElementById("message");
+  m.style.color = "#66ccff";
+  m.textContent += " | Next stop: Arbroath…";
+  setTimeout(loadArbroath, 2500);
+}
 
-  const physicsDt = realDt * TIME_SCALE;
+function endArbroath() {
+  currentLevel = "complete";
 
-  if (!gameOver) {
-    updatePhysics(physicsDt, realDt);
-    handleMidRunMessages(realDt);
+  const total = scoreCarnoustie + scoreArbroath;
+  const avg   = Math.round(total / 2);
+
+  let grade =
+      avg >= 90 ? "Gold Driver" :
+      avg >= 70 ? "Competent" :
+      avg >= 50 ? "Needs Practice" :
+                  "DTM wants a word";
+
+  const summary =
+    `Carnoustie: ${scoreCarnoustie}<br>
+     Arbroath: ${scoreArbroath}<br><br>
+     <b>Total: ${total}</b><br>
+     Average: ${avg}<br>
+     Grade: <b>${grade}</b>`;
+
+  document.getElementById("scoreSummary").innerHTML = summary;
+  document.getElementById("endScreen").style.display = "block";
+  document.getElementById("controls").style.display = "none";
+}
+
+// ===========================================================
+// MAIN LOOP
+// ===========================================================
+function drawScene() {
+  x.clearRect(0,0,c.width,c.height);
+
+  const sky = x.createLinearGradient(0,0,0,c.height);
+  sky.addColorStop(0,"#87ceeb");
+  sky.addColorStop(0.6,"#66a6ff");
+  sky.addColorStop(1,"#b3e5ff");
+  x.fillStyle = sky;
+  x.fillRect(0,0,c.width,c.height);
+
+  const trackY = 185;
+  const endX = c.width - 60;
+  const startX = endX - TRAIN_PIXEL;
+
+  drawTracks(trackY);
+  drawStation(trackY, startX, endX);
+
+  x.fillStyle = "deepskyblue";
+  x.fillRect(endX - 3, trackY - 40, 6, 80);
+
+  if (currentLevel === "arbroath") {
+    drawSpeedBoard20(trackY, endX);
+  }
+
+  drawTrain(trackY, endX);
+}
+
+function loop(ts) {
+  if (!lastTime) lastTime = ts;
+  const realDt = (ts - lastTime) / 1000;
+  lastTime = ts;
+
+  const dt = realDt * TIME_SCALE;
+
+  if (!gameOver && currentLevel !== "complete") {
+    updatePhysics(dt, realDt);
+    checkOverspeed();
+
     if (speed <= 0.1) {
-      gameOver = checkStop();
+      checkStop();
+
+      if (currentLevel === "carnoustie") endCarnoustie();
+      else endArbroath();
+
+      gameOver = true;
     }
   }
 
   drawScene();
   updateHUD();
+
+  prevDist = dist;
   requestAnimationFrame(loop);
 }
 
 requestAnimationFrame(loop);
-
-// ---------- Shared brake command setter ----------
-function setBrakeCmd(newCmd) {
-  newCmd = Math.max(0, Math.min(6, newCmd));
-  if (newCmd !== brakeCmd) {
-    brakeInputCount++;
-    brakeCmd = newCmd;
-  }
-}
-
-// ---------- Controls (keyboard) ----------
-document.addEventListener("keydown", (e) => {
-  const k = e.key.toLowerCase();
-
-  if (k === "a") {
-    setBrakeCmd(brakeCmd + 1);
-  } else if (k === "r") {
-    setBrakeCmd(brakeCmd - 1);
-  } else if (k === "e") {
-    setBrakeCmd(6);
-  } else if (k === "n") {
-    resetRun();
-  }
-});
 </script>
 </body>
 </html>

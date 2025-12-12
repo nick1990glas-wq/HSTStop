@@ -177,7 +177,8 @@ const PERFECT_YARDS    = 10;
 const ACCEPTABLE_YARDS = 20;
 const CLOSE_YARDS      = 50;
 
-const OVERSPEED_THRESHOLD_MPH = 30;
+// TWEAK: make overspeed less punishing / easier to avoid at Arbroath
+const OVERSPEED_THRESHOLD_MPH = 45; // was 30
 
 // Arbroath platform behaviour
 const ARBROATH_PLATFORM_FACTOR   = 1.5; // Arbroath platform 1.5× train length
@@ -335,7 +336,7 @@ async function loadLeaderboard() {
       return;
     }
 
-    let rank = 0;  // <- make sure this is a proper number
+    let rank = 0;
 
     snapshot.forEach((doc) => {
       const data = doc.data();
@@ -345,7 +346,6 @@ async function loadLeaderboard() {
       const cScore  = Number(data.carnoustie);
       const aScore  = Number(data.arbroath);
 
-      // Skip entries with invalid total
       if (!Number.isFinite(total)) {
         console.warn("Skipping invalid leaderboard entry:", data);
         return;
@@ -376,7 +376,6 @@ async function loadLeaderboard() {
 // ===========================================================
 async function saveScoreIfTop10(name, total, sc, sa) {
   try {
-    // Force to numbers
     total = Number(total);
     sc    = Number(sc);
     sa    = Number(sa);
@@ -386,7 +385,6 @@ async function saveScoreIfTop10(name, total, sc, sa) {
       return false;
     }
 
-    // Get current top-10
     const snapshot = await scoresCollection
       .orderBy("total", "desc")
       .limit(10)
@@ -400,19 +398,14 @@ async function saveScoreIfTop10(name, total, sc, sa) {
       qualifies = true;
     } else {
       const lastDoc   = snapshot.docs[snapshot.docs.length - 1];
-      const lastData  = lastDoc.data();
-      const lastScore = Number(lastData.total);
+      const lastScore = Number(lastDoc.data().total);
 
-      // If lastScore is dodgy, or we're better, we qualify
       if (!Number.isFinite(lastScore) || total > lastScore) {
         qualifies = true;
       }
     }
 
-    if (!qualifies) {
-      console.log("Score not high enough for top 10. Not saving.");
-      return false;
-    }
+    if (!qualifies) return false;
 
     await scoresCollection.add({
       name: name || "Anonymous",
@@ -422,7 +415,6 @@ async function saveScoreIfTop10(name, total, sc, sa) {
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     });
 
-    console.log("Saved score into top 10 leaderboard.");
     return true;
   } catch (err) {
     console.error("Error saving top-10 score:", err);
@@ -438,16 +430,13 @@ function checkOverspeed() {
 
   const endX = c.width - 60;
 
-  // Same geometry as in drawScene
-  const platformLengthFactor = ARBROATH_PLATFORM_FACTOR;
-  const platformLength       = TRAIN_PIXEL * platformLengthFactor;
-  const startX               = endX - platformLength;
-  const stopX                = startX + platformLength * ARBROATH_STOP_FRACTION;
+  const platformLength = TRAIN_PIXEL * ARBROATH_PLATFORM_FACTOR;
+  const startX = endX - platformLength;
+  const stopX  = startX + platformLength * ARBROATH_STOP_FRACTION;
 
   const noseOrigin = 60 + 40;
-  const ppm        = (stopX - noseOrigin) / START_DIST_M;
+  const ppm = (stopX - noseOrigin) / START_DIST_M;
 
-  // Distance from platform start to stop marker, in metres
   const boardDistM = (stopX - startX) / ppm;
 
   if (!overspeedFlag &&
@@ -515,7 +504,7 @@ function drawStation(trackY, startX, endX) {
 
 function drawTrain(trackY, stopX) {
   const noseBase = 60 + 40;
-  const ppm      = (stopX - noseBase) / START_DIST_M;
+  const ppm = (stopX - noseBase) / START_DIST_M;
 
   let noseX = dist >= 0
     ? Math.max(stopX - dist * ppm, noseBase)
@@ -562,7 +551,6 @@ function drawTrain(trackY, stopX) {
   }
 }
 
-// Speed board at platform start
 function drawSpeedBoard20(trackY, startX) {
   const y = trackY - 60;
 
@@ -609,17 +597,17 @@ function updateHUD() {
      Bogie pressure: ${brakeAct}`;
 }
 
-// Arbroath easier: gentler distance penalty
 function calculateScore(yardsError, finalBrakeAct) {
   let score = 100;
   const abs = Math.abs(yardsError);
 
-  let perYard         = 1.2;
-  let maxDistPenalty  = 60;
+  let perYard = 1.2;
+  let maxDistPenalty = 60;
 
+  // TWEAK: Arbroath much more forgiving so nailed stops can be 95+
   if (currentLevel === "arbroath") {
-    perYard        = 0.8;  // fewer points per yard
-    maxDistPenalty = 40;   // lower cap
+    perYard = 0.5;        // was 0.8
+    maxDistPenalty = 25;  // was 40
   }
 
   score -= Math.min(abs * perYard, maxDistPenalty);
@@ -631,12 +619,13 @@ function calculateScore(yardsError, finalBrakeAct) {
   score -= pressurePenalty;
 
   if (usedEmergency) score -= 15;
-  if (currentLevel === "arbroath" && overspeedFlag) score -= 25;
+
+  // TWEAK: Overspeed penalty reduced
+  if (currentLevel === "arbroath" && overspeedFlag) score -= 10; // was 25
 
   return Math.max(0, Math.min(100, Math.round(score)));
 }
 
-// Arbroath has wider “perfect / acceptable / close” bands
 function checkStop() {
   if (speed > 0.1) return false;
 
@@ -704,7 +693,6 @@ function endArbroath() {
       avg >= 50 ? "Needs Practice" :
                   "DTM wants a word";
 
-  // Ask for nickname for leaderboard
   let nickname = prompt("Enter your driver nickname for the leaderboard:", "");
   if (nickname) nickname = nickname.trim();
   if (!nickname) nickname = "Anonymous";
@@ -721,7 +709,6 @@ function endArbroath() {
   document.getElementById("endScreen").style.display = "block";
   document.getElementById("controls").style.display = "none";
 
-  // Save only if top-10, then show leaderboard and "NEW HIGH SCORE" if applicable
   saveScoreIfTop10(nickname, total, scoreCarnoustie, scoreArbroath)
     .then((didSave) => {
       if (didSave) {
@@ -756,13 +743,8 @@ function drawScene() {
   const trackY = 185;
   const endX   = c.width - 60;
 
-  // Carnoustie: platform = 1× train length, stop at end
-  // Arbroath:   platform = 1.5× train length, stop at 4/5ths
-  const platformLengthFactor =
-    currentLevel === "arbroath" ? ARBROATH_PLATFORM_FACTOR : 1.0;
-
-  const platformLength = TRAIN_PIXEL * platformLengthFactor;
-  const startX         = endX - platformLength;
+  const platformLength = TRAIN_PIXEL * (currentLevel === "arbroath" ? ARBROATH_PLATFORM_FACTOR : 1.0);
+  const startX = endX - platformLength;
 
   const stopX =
     currentLevel === "arbroath"
@@ -772,7 +754,6 @@ function drawScene() {
   drawTracks(trackY);
   drawStation(trackY, startX, endX);
 
-  // Blue stop marker at stopX
   x.fillStyle = "deepskyblue";
   x.fillRect(stopX - 3, trackY - 40, 6, 80);
 

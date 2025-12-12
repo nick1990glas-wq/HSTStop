@@ -316,28 +316,13 @@ function updatePhysics(dt, realDt) {
 }
 
 // ===========================================================
-// LEADERBOARD: SAVE & LOAD
+// LEADERBOARD: LOAD (top 10, skip bad data)
 // ===========================================================
-async function saveScoreToLeaderboard(nickname, total, sc, sa) {
-  try {
-    await scoresCollection.add({
-      name: nickname || "Anonymous",
-      total: total,
-      carnoustie: sc,
-      arbroath: sa,
-      createdAt: firebase.firestore.FieldValue.serverTimestamp()
-    });
-  } catch (err) {
-    console.error("Error saving score:", err);
-  }
-}
-
 async function loadLeaderboard() {
   const list = document.getElementById("leaderboard");
   list.innerHTML = "<li>Loading…</li>";
 
   try {
-    // Simplified: only orderBy total, no composite index needed
     const snapshot = await scoresCollection
       .orderBy("total", "desc")
       .limit(10)
@@ -350,22 +335,58 @@ async function loadLeaderboard() {
       return;
     }
 
-    snapshot.forEach((doc, index) => {
+    let rank = 0;  // <- make sure this is a proper number
+
+    snapshot.forEach((doc) => {
       const data = doc.data();
+
+      const name    = data.name || "Anonymous";
+      const total   = Number(data.total);
+      const cScore  = Number(data.carnoustie);
+      const aScore  = Number(data.arbroath);
+
+      // Skip entries with invalid total
+      if (!Number.isFinite(total)) {
+        console.warn("Skipping invalid leaderboard entry:", data);
+        return;
+      }
+
+      rank += 1;
+
+      const cText = Number.isFinite(cScore) ? cScore : "?";
+      const aText = Number.isFinite(aScore) ? aScore : "?";
+
       const li = document.createElement("li");
-      li.textContent = `${index + 1}. ${data.name} – ${data.total} (C: ${data.carnoustie}, A: ${data.arbroath})`;
+      li.textContent = `${rank}. ${name} – ${total} (C: ${cText}, A: ${aText})`;
       list.appendChild(li);
     });
+
+    if (rank === 0) {
+      list.innerHTML = "<li>No valid scores yet – be the first!</li>";
+    }
+
   } catch (err) {
     console.error("Error loading leaderboard:", err);
     list.innerHTML = "<li>Could not load leaderboard.</li>";
   }
 }
 
-// ONLY SAVE SCORE IF IT QUALIFIES FOR TOP 10
+// ===========================================================
+// LEADERBOARD: ONLY SAVE IF TOP 10
+// ===========================================================
 async function saveScoreIfTop10(name, total, sc, sa) {
   try {
-    // Get current top 10
+    // Force to numbers
+    total = Number(total);
+    sc    = Number(sc);
+    sa    = Number(sa);
+
+    if (!Number.isFinite(total)) {
+      console.log("Total score is not a valid number, not saving.");
+      return false;
+    }
+
+    // Get current top-10
     const snapshot = await scoresCollection
       .orderBy("total", "desc")
       .limit(10)
@@ -374,21 +395,23 @@ async function saveScoreIfTop10(name, total, sc, sa) {
     let qualifies = false;
 
     if (snapshot.empty) {
-      qualifies = true;               // no scores yet
+      qualifies = true;
     } else if (snapshot.size < 10) {
-      qualifies = true;               // fewer than 10 scores
+      qualifies = true;
     } else {
-      // Compare with 10th place
       const lastDoc   = snapshot.docs[snapshot.docs.length - 1];
-      const lastScore = lastDoc.data().total;
-      if (total > lastScore) {
+      const lastData  = lastDoc.data();
+      const lastScore = Number(lastData.total);
+
+      // If lastScore is dodgy, or we're better, we qualify
+      if (!Number.isFinite(lastScore) || total > lastScore) {
         qualifies = true;
       }
     }
 
     if (!qualifies) {
       console.log("Score not high enough for top 10. Not saving.");
-      return false; // did NOT save
+      return false;
     }
 
     await scoresCollection.add({
@@ -400,7 +423,7 @@ async function saveScoreIfTop10(name, total, sc, sa) {
     });
 
     console.log("Saved score into top 10 leaderboard.");
-    return true; // DID save (NEW HIGH SCORE)
+    return true;
   } catch (err) {
     console.error("Error saving top-10 score:", err);
     return false;

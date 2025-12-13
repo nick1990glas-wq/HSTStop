@@ -601,30 +601,55 @@ function calculateScore(yardsError, finalBrakeAct) {
   let score = 100;
   const abs = Math.abs(yardsError);
 
+  // -----------------------------
+  // Distance penalty tuning
+  // -----------------------------
   let perYard = 1.2;
   let maxDistPenalty = 60;
 
-  // TWEAK: Arbroath much more forgiving so nailed stops can be 95+
   if (currentLevel === "arbroath") {
-    perYard = 0.5;        // was 0.8
-    maxDistPenalty = 25;  // was 40
+    perYard = 0.5;        // gentler distance penalty
+    maxDistPenalty = 25;  // lower cap
   }
 
   score -= Math.min(abs * perYard, maxDistPenalty);
 
+  // -----------------------------
+  // Input penalty tuning (biggest reason scores felt capped)
+  // -----------------------------
   const extraInputs = Math.max(0, brakeInputCount - 3);
-  score -= extraInputs * 5;
 
-  const pressurePenalty = Math.max(0, finalBrakeAct - 1) * 3;
-  score -= pressurePenalty;
+  if (currentLevel === "arbroath") {
+    // Much lighter penalty, with a cap
+    const inputPenalty = Math.min(extraInputs * 1, 10); // max -10
+    score -= inputPenalty;
+  } else {
+    score -= extraInputs * 5;
+  }
 
+  // -----------------------------
+  // Pressure penalty tuning
+  // -----------------------------
+  const pressureSteps = Math.max(0, finalBrakeAct - 1);
+
+  if (currentLevel === "arbroath") {
+    const pressurePenalty = Math.min(pressureSteps * 1, 5); // max -5
+    score -= pressurePenalty;
+  } else {
+    score -= pressureSteps * 3;
+  }
+
+  // -----------------------------
+  // Other penalties
+  // -----------------------------
   if (usedEmergency) score -= 15;
 
-  // TWEAK: Overspeed penalty reduced
-  if (currentLevel === "arbroath" && overspeedFlag) score -= 10; // was 25
+  // Overspeed (now mild)
+  if (currentLevel === "arbroath" && overspeedFlag) score -= 10;
 
   return Math.max(0, Math.min(100, Math.round(score)));
 }
+
 
 function checkStop() {
   if (speed > 0.1) return false;
